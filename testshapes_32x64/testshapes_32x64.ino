@@ -14,17 +14,19 @@
 // Pin A4 works on the Adafruit Metro M4 (if using the Adafruit RGB
 // Matrix Shield, cut trace between CLK pads and run a wire to A4).
 
-#define CLK  16   // USE THIS ON ADAFRUIT METRO M0, etc.
+#define CLK  15   // USE THIS ON ADAFRUIT METRO M0, etc.
 //#define CLK A4 // USE THIS ON METRO M4 (not M0)
 //#define CLK 11 // USE THIS ON ARDUINO MEGA
-#define OE   15
-#define LAT 4
-#define A   23
-#define B   22
-#define C   5
-#define D  17
+#define OE   33
+#define LAT 32
+#define A   12
+#define B   16
+#define C   17
+#define D  18
 
 RGBmatrixPanel matrix(A, B, C, D, CLK, LAT, OE, false, 64);
+
+float big_value = 1.0;
 
 void setup() {
 
@@ -108,6 +110,19 @@ void setup() {
 
 void loop() {
   // Do nothing -- image doesn't change
+  // matrix.fillScreen(matrix.Color333(0, 0, 0));
+   matrix.fillScreen(matrix.Color333(0, 0, 0));
+
+  // draw some text!
+  matrix.setTextSize(2);     // size 1 == 8 pixels high
+  matrix.setTextWrap(false); // Don't wrap at end of line - will do ourselves
+
+  matrix.setCursor(2, 10);    // start at top left, with 8 pixel of spacing
+  
+  matrix.setTextColor(matrix.Color333(4,0,7));
+  matrix.println(big_value,2);
+  big_value+= 0.01;
+  delay(1000);
 }
 
 

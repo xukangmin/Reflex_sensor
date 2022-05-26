@@ -127,13 +127,13 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
 
   
 
-    esp_err_t result = esp_now_send(peer_addr, &data, sizeof(data));
+    esp_err_t result = esp_now_send(slaves[slaveCnt].peer_addr, &data, sizeof(data));
     // Send registered info to slave
     
     delay(500);
 
     
-    SlaveCnt++;
+    slaveCnt++;
 
   }
 
