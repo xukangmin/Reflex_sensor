@@ -19,6 +19,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/timers.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -28,12 +31,16 @@
 #include "esp_now.h"
 #include "esp_crc.h"
 #include "espnow.h"
+#include "driver/gpio.h"
 
 #define ESPNOW_MAXDELAY 512
 
 
-#define GPIO_INPUT_IO_1     CONFIG_GPIO_INPUT_1
-#define GPIO_INPUT_PIN_SEL  (1ULL<<GPIO_INPUT_IO_1))
+#define GPIO_INPUT_IO_1     5
+#define GPIO_INPUT_PIN_SEL  (1ULL<<GPIO_INPUT_IO_1)
+
+#define LED_GPIO          10
+#define GPIO_OUTPUT_PIN_SEL  (1ULL<<LED_GPIO)
 
 #define ESP_INTR_FLAG_DEFAULT 0
 
@@ -47,6 +54,10 @@ static uint16_t s_espnow_seq[ESPNOW_DATA_MAX] = { 0, 0 };
 static void espnow_deinit(espnow_send_param_t *send_param);
 
 static int64_t start_time, end_time, diff_time = 0;
+
+static esp_now_peer_info_t master_info;
+
+static int  button_triggered_status = 0;
 
 static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
@@ -122,7 +133,7 @@ static void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len
 }
 
 /* Parse received ESPNOW data. */
-int espnow_data_parse(uint8_t *data, uint16_t data_len, uint8_t *state, uint16_t *seq, int *magic)
+int espnow_data_parse(uint8_t *data, uint16_t data_len, uint8_t *state, uint16_t *seq, uint8_t *sensor_data_type)
 {
     espnow_data_t *buf = (espnow_data_t *)data;
     uint16_t crc, crc_cal = 0;
@@ -134,7 +145,7 @@ int espnow_data_parse(uint8_t *data, uint16_t data_len, uint8_t *state, uint16_t
 
     *state = buf->state;
     *seq = buf->seq_num;
-    *magic = buf->magic;
+    *sensor_data_type = buf->sensor_data_type;
     crc = buf->crc;
     buf->crc = 0;
     crc_cal = esp_crc16_le(UINT16_MAX, (uint8_t const *)buf, data_len);
@@ -144,6 +155,31 @@ int espnow_data_parse(uint8_t *data, uint16_t data_len, uint8_t *state, uint16_t
     }
 
     return -1;
+}
+
+/* Prepare ESPNOW data to be sent. */
+void espnow_sensor_data_prepare(espnow_send_param_t *send_param, uint32_t milliseconds)
+{
+    espnow_data_t *buf = (espnow_data_t *)send_param->buffer;
+
+    assert(send_param->len >= sizeof(espnow_data_t));
+
+    buf->type = IS_BROADCAST_ADDR(send_param->dest_mac) ? ESPNOW_DATA_BROADCAST : ESPNOW_DATA_UNICAST;
+    buf->state = send_param->state;
+    buf->seq_num = s_espnow_seq[buf->type]++;
+    buf->crc = 0;
+    buf->sensor_data_type = SENSOR_DATA_RESULT;
+
+
+    // buf->magic = send_param->magic;
+    /* Fill all remaining bytes after the data with random values */
+    ESP_LOGI(TAG, "length=%d\n", send_param->len - sizeof(espnow_data_t));
+
+    memcpy(buf->payload, &milliseconds, sizeof(uint32_t));
+
+
+    //esp_fill_random(buf->payload, send_param->len - sizeof(espnow_data_t));
+    buf->crc = esp_crc16_le(UINT16_MAX, (uint8_t const *)buf, send_param->len);
 }
 
 /* Prepare ESPNOW data to be sent. */
@@ -157,7 +193,7 @@ void espnow_data_prepare(espnow_send_param_t *send_param)
     buf->state = send_param->state;
     buf->seq_num = s_espnow_seq[buf->type]++;
     buf->crc = 0;
-    buf->magic = send_param->magic;
+    // buf->magic = send_param->magic;
     /* Fill all remaining bytes after the data with random values */
     ESP_LOGI(TAG, "length=%d\n", send_param->len - sizeof(espnow_data_t));
     esp_fill_random(buf->payload, send_param->len - sizeof(espnow_data_t));
@@ -169,7 +205,7 @@ static void espnow_task(void *pvParameter)
     espnow_event_t evt;
     uint8_t recv_state = 0;
     uint16_t recv_seq = 0;
-    int recv_magic = 0;
+    uint8_t sensor_data_type = 0;
     bool is_broadcast = false;
     int ret;
 
@@ -198,12 +234,16 @@ static void espnow_task(void *pvParameter)
                 }
 
                 if (!is_broadcast) {
-                    send_param->count--;
-                    if (send_param->count == 0) {
-                        ESP_LOGI(TAG, "Send done");
-                        espnow_deinit(send_param);
-                        vTaskDelete(NULL);
-                    }
+
+                    ESP_LOGD(TAG, "Data Sent to Mater");
+                    break;
+                    
+                    // send_param->count--;
+                    // if (send_param->count == 0) {
+                    //     ESP_LOGI(TAG, "Send done");
+                    //     espnow_deinit(send_param);
+                    //     vTaskDelete(NULL);
+                    // }
                 }
 
                 /* Delay a while before sending the next data. */
@@ -228,8 +268,8 @@ static void espnow_task(void *pvParameter)
             {
                 espnow_event_recv_cb_t *recv_cb = &evt.info.recv_cb;
 
-                ret = espnow_data_parse(recv_cb->data, recv_cb->data_len, &recv_state, &recv_seq, &recv_magic);
-                free(recv_cb->data);
+                ret = espnow_data_parse(recv_cb->data, recv_cb->data_len, &recv_state, &recv_seq, &sensor_data_type);
+                
                 // if (ret == ESPNOW_DATA_BROADCAST) {
                 //     ESP_LOGI(TAG, "Receive %dth broadcast data from: "MACSTR", len: %d", recv_seq, MAC2STR(recv_cb->mac_addr), recv_cb->data_len);
 
@@ -291,46 +331,83 @@ static void espnow_task(void *pvParameter)
 
 
                     send_param->broadcast = false;
-
+                    
                     // 
-                    if (data == REGISTER)
+                    if (sensor_data_type == SENSOR_DATA_REGISTER)
                     {
                         // waiting for response
+                        ESP_LOGI(TAG, "SETUP Master Peer "MACSTR"", MAC2STR(recv_cb->mac_addr));
+
+
+
+                        // set out mater as peer
+                        master_info.channel = CONFIG_ESPNOW_CHANNEL;
+                        master_info.ifidx = ESPNOW_WIFI_IF;
+                        master_info.encrypt = true;
+                        memcpy(master_info.lmk, CONFIG_ESPNOW_LMK, ESP_NOW_KEY_LEN);
+                        memcpy(master_info.peer_addr, recv_cb->mac_addr, ESP_NOW_ETH_ALEN);
+                        
+                        if (esp_now_is_peer_exist(recv_cb->mac_addr) == false)
+                        {
+                            esp_now_add_peer(&master_info);
+                        }
                     }
-                    else if (data == TRIGGER)
+                    else if (sensor_data_type == SENSOR_DATA_TRIGGER)
                     {
                         // trigger LED on
                         // waiting LED 
-                         start_time = esp_timer_get_time();
+                        ESP_LOGI(TAG, "Received Trigger Request, start light up the LED");
+
+                        start_time = esp_timer_get_time();
+
+                        gpio_set_level(LED_GPIO, 1);
+
+                        button_triggered_status = 1;
+
                     }
-                    else if (data == RECV_CONFIRM)
+                    else if (sensor_data_type == SENSOR_DATA_RECV_CONFIRM)
                     {
                         
+
                     }
 
                 }
                 else {
                     ESP_LOGI(TAG, "Receive error data from: "MACSTR"", MAC2STR(recv_cb->mac_addr));
                 }
+                free(recv_cb->data);
                 break;
             }
             case ESPNOW_BUTTON_PRESSED:
             {
-                end_time = esp_timer_get_time();
+                ESP_LOGI(TAG, "Button triggered");
+                if (button_triggered_status == 1)
+                {
+                     end_time = esp_timer_get_time();
 
-                diff_time = end_time - start_time; // in microseconds
+                     diff_time = end_time - start_time; // in microseconds
 
-                // prepare data, send to master
+                    // prepare data, send to master
                 
-                memcpy(send_param->dest_mac, send_cb->mac_addr, ESP_NOW_ETH_ALEN);
-                espnow_data_prepare(send_param);
+                    uint32_t diff = (uint32_t)(diff_time / 1000);
 
-                /* Send the next data after the previous data is sent. */
-                if (esp_now_send(send_param->dest_mac, send_param->buffer, send_param->len) != ESP_OK) {
-                    ESP_LOGE(TAG, "Send error");
-                    espnow_deinit(send_param);
-                    vTaskDelete(NULL);
+                    memcpy(send_param->dest_mac, master_info.peer_addr, ESP_NOW_ETH_ALEN);
+                    espnow_sensor_data_prepare(send_param, diff);
+
+
+                    ESP_LOGI(TAG, "Send diff data to master=%d", diff);
+                    /* Send the next data after the previous data is sent. */
+                    if (esp_now_send(send_param->dest_mac, send_param->buffer, send_param->len) != ESP_OK) {
+                        ESP_LOGE(TAG, "Send error");
+                        espnow_deinit(send_param);
+                        vTaskDelete(NULL);
+                    }
+
                 }
+            
+
+
+
                 break;
             }
             default:
@@ -421,6 +498,22 @@ void app_main(void)
 
     //zero-initialize the config structure.
     gpio_config_t io_conf = {};
+
+    //disable interrupt
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    //set as output mode
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    //bit mask of the pins that you want to set,e.g.GPIO18/19
+    io_conf.pin_bit_mask = GPIO_OUTPUT_PIN_SEL;
+    //disable pull-down mode
+    io_conf.pull_down_en = 0;
+    //disable pull-up mode
+    io_conf.pull_up_en = 0;
+    //configure GPIO with the given settings
+    gpio_config(&io_conf);
+
+
+
     //interrupt of rising edge
     io_conf.intr_type = GPIO_INTR_POSEDGE;
     //bit mask of the pins, use GPIO4/5 here

@@ -58,14 +58,21 @@ enum {
     ESPNOW_DATA_MAX,
 };
 
+enum {
+    SENSOR_DATA_REGISTER,
+    SENSOR_DATA_TRIGGER,
+    SENSOR_DATA_RECV_CONFIRM,
+    SENSOR_DATA_RESULT,
+};
+
 /* User defined field of ESPNOW data in this example. */
 typedef struct {
     uint8_t type;                         //Broadcast or unicast ESPNOW data.
     uint8_t state;                        //Indicate that if has received broadcast ESPNOW data or not.
     uint16_t seq_num;                     //Sequence number of ESPNOW data.
     uint16_t crc;                         //CRC16 value of ESPNOW data.
-    uint32_t magic;                       //Magic number which is used to determine which device to send unicast ESPNOW data.
-    uint8_t payload[12];                   //Real payload of ESPNOW data.
+    uint8_t sensor_data_type;              //Sensor data type
+    uint8_t payload[25];                   //Real payload of ESPNOW data.
 } __attribute__((packed)) espnow_data_t;
 
 /* Parameters of sending ESPNOW data. */

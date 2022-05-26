@@ -11,5 +11,22 @@
     "idf.portWin": "COM11",
     "idf.pythonBinPathWin": "C:\\Users\\kangmin\\.espressif\\python_env\\idf4.4_py3.8_env\\Scripts\\python.exe",
     "idf.toolsPathWin": "C:\\Users\\kangmin\\.espressif",
-    "idf.flashType": "UART"
+    "idf.flashType": "UART",
+    "files.associations": {
+        "*.ejs": "html",
+        "espnow.h": "c",
+        "gpio.h": "c",
+        "esp_bit_defs.h": "c",
+        "array": "c",
+        "chrono": "c",
+        "functional": "c",
+        "istream": "c",
+        "ostream": "c",
+        "ratio": "c",
+        "tuple": "c",
+        "type_traits": "c",
+        "utility": "c",
+        "string": "c",
+        "string_view": "c"
+    }
 }

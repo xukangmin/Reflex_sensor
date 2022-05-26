@@ -41,6 +41,34 @@
 esp_now_peer_info_t slaves[NUMSLAVES] = {};
 int slaveCnt = 0;
 
+enum {
+    ESPNOW_DATA_BROADCAST,
+    ESPNOW_DATA_UNICAST,
+    ESPNOW_DATA_MAX,
+};
+
+enum {
+    SENSOR_DATA_REGISTER,
+    SENSOR_DATA_TRIGGER,
+    SENSOR_DATA_RECV_CONFIRM,
+    SENSOR_DATA_RESULT,
+};
+
+/* User defined field of ESPNOW data in this example. */
+typedef struct {
+    uint8_t type;                         //Broadcast or unicast ESPNOW data.
+    uint8_t state;                        //Indicate that if has received broadcast ESPNOW data or not.
+    uint16_t seq_num;                     //Sequence number of ESPNOW data.
+    uint16_t crc;                         //CRC16 value of ESPNOW data.
+    uint8_t sensor_data_type;              //Sensor data type
+    uint8_t payload[25];                   //Real payload of ESPNOW data.
+} __attribute__((packed)) espnow_data_t;
+
+
+static espnow_data_t sensor_data;
+static int seq_num = 0;
+
+static uint32_t recv_diff;
 // Init ESP Now with fallback
 void InitESPNow() {
   WiFi.disconnect();
@@ -95,6 +123,15 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
   snprintf(macStr, sizeof(macStr), "%02x:%02x:%02x:%02x:%02x:%02x",
            mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
 
+ 
+  Serial.print("Last Packet Recv from: "); Serial.println(macStr);
+  Serial.println("Last Packet Recv Data: "); 
+  for (int i = 0; i < data_len; i++)
+  {
+    Serial.print(data[i],HEX);
+    Serial.print(" ");
+  }
+  Serial.println("");
   // add peer
   if (esp_now_is_peer_exist(mac_addr) == false)
   {
@@ -125,11 +162,17 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
       Serial.println("Not sure what happened");
     }
 
-  
+    sensor_data.type = ESPNOW_DATA_UNICAST;
+    sensor_data.state = 0;
+    sensor_data.seq_num = seq_num++;
+    sensor_data.crc = 0;
+    sensor_data.sensor_data_type = SENSOR_DATA_REGISTER;
 
-    esp_err_t result = esp_now_send(slaves[slaveCnt].peer_addr, &data, sizeof(data));
-    // Send registered info to slave
+    memset(sensor_data.payload,0,sizeof(sensor_data.payload));
     
+
+    esp_err_t result = esp_now_send(slaves[slaveCnt].peer_addr, (const uint8_t *)&sensor_data, sizeof(sensor_data));
+
     delay(500);
 
     
@@ -137,12 +180,38 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
 
   }
 
+  espnow_data_t* recv_data = (espnow_data_t*)data;
+
+  if (recv_data->sensor_data_type == SENSOR_DATA_RESULT)
+  {
+    Serial.println("receive result data from slave");
+
+    memcpy(&recv_diff,recv_data->payload,sizeof(uint32_t));
+
+    Serial.print("received diff");
+
+    Serial.println(recv_diff);
+  }
   
-  Serial.print("Last Packet Recv from: "); Serial.println(macStr);
-  Serial.print("Last Packet Recv Data: "); Serial.println(*data);
-  Serial.println("");
+
+}
+
+void send_trigger_request_to_slave()
+{
+    sensor_data.type = ESPNOW_DATA_UNICAST;
+    sensor_data.state = 0;
+    sensor_data.seq_num = seq_num++;
+    sensor_data.crc = 0;
+    sensor_data.sensor_data_type = SENSOR_DATA_TRIGGER;
+
+    memset(sensor_data.payload,0,sizeof(sensor_data.payload));
+
+    esp_err_t result = esp_now_send(slaves[0].peer_addr, (const uint8_t *)&sensor_data, sizeof(sensor_data));
 }
 
 void loop() {
   // Chill
+  delay(5000);
+
+  send_trigger_request_to_slave();
 }
