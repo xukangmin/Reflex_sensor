@@ -28,19 +28,74 @@
          Based on the ESPNOW API, there is no concept of Master and Slave.
          Any devices can act as master or salve.
 */
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+BLEServer *pServer = NULL;
+BLECharacteristic * pTxCharacteristic;
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+uint8_t txValue = 0;
+
+// See the following for generating UUIDs:
+// https://www.uuidgenerator.net/
+
+#define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E" // UART service UUID
+#define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+
 
 #include <esp_now.h>
 #include <WiFi.h>
+#include <RGBmatrixPanel.h>
 
+// Most of the signal pins are configurable, but the CLK pin has some
+// special constraints.  On 8-bit AVR boards it must be on PORTB...
+// Pin 11 works on the Arduino Mega.  On 32-bit SAMD boards it must be
+// on the same PORT as the RGB data pins (D2-D7)...
+// Pin 8 works on the Adafruit Metro M0 or Arduino Zero,
+// Pin A4 works on the Adafruit Metro M4 (if using the Adafruit RGB
+// Matrix Shield, cut trace between CLK pads and run a wire to A4).
+
+#define CLK  15   // USE THIS ON ADAFRUIT METRO M0, etc.
+//#define CLK A4 // USE THIS ON METRO M4 (not M0)
+//#define CLK 11 // USE THIS ON ARDUINO MEGA
+#define OE   33
+#define LAT 32
+#define A   12
+#define B   16
+#define C   17
+#define D  18
+
+int running_speed = 5;
 #define CONFIG_ESPNOW_CHANNEL 1
 #define CHANNEL 1
 #define CONFIG_ESPNOW_PMK "pmk1234567890123"
 #define CONFIG_ESPNOW_LMK "lmk1234567890123"
 
+RGBmatrixPanel matrix(A, B, C, D, CLK, LAT, OE, false, 64);
+
 #define NUMSLAVES 20
 esp_now_peer_info_t slaves[NUMSLAVES] = {};
 int slaveCnt = 0;
 
+int period = 10000;
+int time_now = 0;
+
+void update_period()
+{
+   if(running_speed == 0)
+   {
+      period = 500;
+   }
+   else{
+      period = 1000 * running_speed;
+   }
+}
+
+volatile int result_received = 0;
 enum {
     ESPNOW_DATA_BROADCAST,
     ESPNOW_DATA_UNICAST,
@@ -68,7 +123,7 @@ typedef struct {
 static espnow_data_t sensor_data;
 static int seq_num = 0;
 
-static uint32_t recv_diff;
+static uint32_t recv_diff = 0;
 // Init ESP Now with fallback
 void InitESPNow() {
   WiFi.disconnect();
@@ -98,15 +153,62 @@ void configDeviceAP() {
   }
 }
 
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+    };
+
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+    }
+};
+
+class MyCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+      std::string rxValue = pCharacteristic->getValue();
+
+      if (rxValue.length() > 0) {
+        Serial.println("*********");
+        Serial.print("Received Value: ");
+
+        if (rxValue.compare("+") == 0)
+        {
+            if (running_speed < 10)
+            {
+              running_speed++;
+            }
+        }
+        else if (rxValue.compare("-") == 0)
+        {
+            if (running_speed > 0)
+            {
+              running_speed--;
+            }
+        }
+
+        update_period();
+        update_screen();
+        for (int i = 0; i < rxValue.length(); i++)
+          Serial.print(rxValue[i]);
+
+        Serial.println();
+        Serial.println("*********");
+      }
+    }
+};
+
 void setup() {
+  
   Serial.begin(115200);
   Serial.println("ESPNow/Basic/Slave Example");
   //Set device in AP mode to begin with
-  WiFi.mode(WIFI_AP);
+  //WiFi.mode(WIFI_AP);
+  WiFi.mode(WIFI_STA);
   // configure device AP mode
-  configDeviceAP();
+  // configDeviceAP();
   // This is the mac address of the Slave in AP Mode
-  Serial.print("AP MAC: "); Serial.println(WiFi.softAPmacAddress());
+  // Serial.print("AP MAC: "); Serial.println(WiFi.softAPmacAddress());
+  Serial.print("STA MAC: "); Serial.println(WiFi.macAddress());
   // Init ESPNow with a fallback logic
   InitESPNow();
   // Once ESPNow is successfully Init, we will register for recv CB to
@@ -114,6 +216,41 @@ void setup() {
   esp_now_register_recv_cb(OnDataRecv);
   
   
+
+  BLEDevice::init("Reflex Trainer");
+
+  // Create the BLE Server
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  // Create the BLE Service
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  // Create a BLE Characteristic
+  pTxCharacteristic = pService->createCharacteristic(
+                    CHARACTERISTIC_UUID_TX,
+                    BLECharacteristic::PROPERTY_NOTIFY
+                  );
+                      
+  pTxCharacteristic->addDescriptor(new BLE2902());
+
+  BLECharacteristic * pRxCharacteristic = pService->createCharacteristic(
+                       CHARACTERISTIC_UUID_RX,
+                      BLECharacteristic::PROPERTY_WRITE
+                    );
+
+  pRxCharacteristic->setCallbacks(new MyCallbacks());
+
+  // Start the service
+  pService->start();
+
+  // Start advertising
+  pServer->getAdvertising()->start();
+  Serial.println("Waiting a client connection to notify...");
+
+  matrix.begin();
+
+  update_screen();
 }
 
 
@@ -133,54 +270,84 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
   }
   Serial.println("");
   // add peer
-  if (esp_now_is_peer_exist(mac_addr) == false)
-  {
-
-
-        
-    slaves[slaveCnt].channel = CONFIG_ESPNOW_CHANNEL;
-    slaves[slaveCnt].encrypt = true;
-    memcpy(slaves[slaveCnt].lmk, CONFIG_ESPNOW_LMK, ESP_NOW_KEY_LEN);
-    memcpy(slaves[slaveCnt].peer_addr, mac_addr, ESP_NOW_ETH_ALEN);
-
-    esp_err_t addStatus = esp_now_add_peer(&slaves[slaveCnt]);
-    if (addStatus == ESP_OK) {
-      // Pair success
-      Serial.println("Pair success");
-    } else if (addStatus == ESP_ERR_ESPNOW_NOT_INIT) {
-      // How did we get so far!!
-      Serial.println("ESPNOW Not Init");
-    } else if (addStatus == ESP_ERR_ESPNOW_ARG) {
-      Serial.println("Add Peer - Invalid Argument");
-    } else if (addStatus == ESP_ERR_ESPNOW_FULL) {
-      Serial.println("Peer list full");
-    } else if (addStatus == ESP_ERR_ESPNOW_NO_MEM) {
-      Serial.println("Out of memory");
-    } else if (addStatus == ESP_ERR_ESPNOW_EXIST) {
-      Serial.println("Peer Exists");
-    } else {
-      Serial.println("Not sure what happened");
-    }
-
-    sensor_data.type = ESPNOW_DATA_UNICAST;
-    sensor_data.state = 0;
-    sensor_data.seq_num = seq_num++;
-    sensor_data.crc = 0;
-    sensor_data.sensor_data_type = SENSOR_DATA_REGISTER;
-
-    memset(sensor_data.payload,0,sizeof(sensor_data.payload));
-    
-
-    esp_err_t result = esp_now_send(slaves[slaveCnt].peer_addr, (const uint8_t *)&sensor_data, sizeof(sensor_data));
-
-    delay(500);
-
-    
-    slaveCnt++;
-
-  }
 
   espnow_data_t* recv_data = (espnow_data_t*)data;
+
+  if (recv_data->type == ESPNOW_DATA_BROADCAST)
+  {
+      if (esp_now_is_peer_exist(mac_addr) == false)
+      {
+        slaves[slaveCnt].channel = CONFIG_ESPNOW_CHANNEL;
+        slaves[slaveCnt].encrypt = false;
+        slaves[slaveCnt].ifidx = (wifi_interface_t)ESP_IF_WIFI_STA;
+        // memcpy(slaves[slaveCnt].lmk, CONFIG_ESPNOW_LMK, ESP_NOW_KEY_LEN);
+        memcpy(slaves[slaveCnt].peer_addr, mac_addr, ESP_NOW_ETH_ALEN);
+    
+        esp_err_t addStatus = esp_now_add_peer(&slaves[slaveCnt]);
+        if (addStatus == ESP_OK) {
+          // Pair success
+          Serial.println("Pair success");
+        } else if (addStatus == ESP_ERR_ESPNOW_NOT_INIT) {
+          // How did we get so far!!
+          Serial.println("ESPNOW Not Init");
+        } else if (addStatus == ESP_ERR_ESPNOW_ARG) {
+          Serial.println("Add Peer - Invalid Argument");
+        } else if (addStatus == ESP_ERR_ESPNOW_FULL) {
+          Serial.println("Peer list full");
+        } else if (addStatus == ESP_ERR_ESPNOW_NO_MEM) {
+          Serial.println("Out of memory");
+        } else if (addStatus == ESP_ERR_ESPNOW_EXIST) {
+          Serial.println("Peer Exists");
+        } else {
+          Serial.println("Not sure what happened");
+        }
+    
+       
+    
+        // memset(sensor_data.payload,0,sizeof(sensor_data.payload));
+    
+       for(int i = 0; i < 6; i++)
+       {
+        Serial.print(slaves[slaveCnt].peer_addr[i],HEX);
+        Serial.print(" ");
+       }
+       Serial.println("");
+
+
+      
+    
+        delay(500);
+    
+        
+        slaveCnt++;
+        Serial.println("peer added");
+        update_screen();
+      }
+
+      sensor_data.type = ESPNOW_DATA_UNICAST;
+      sensor_data.state = 0;
+      sensor_data.seq_num = seq_num++;
+      sensor_data.crc = 0;
+      sensor_data.sensor_data_type = SENSOR_DATA_REGISTER;
+    
+      esp_err_t result = esp_now_send(mac_addr, (const uint8_t *)&sensor_data, sizeof(sensor_data));
+  
+      if (result == ESP_OK)
+      {
+        Serial.println("send ok");
+      }
+      else{
+        Serial.print("send error=");
+        Serial.println(result);
+      }
+      
+  }
+    
+  
+
+
+  
+  
 
   if (recv_data->sensor_data_type == SENSOR_DATA_RESULT)
   {
@@ -191,9 +358,45 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
     Serial.print("received diff");
 
     Serial.println(recv_diff);
+
+
+    update_screen();
+    result_received = 1;
+
   }
   
 
+}
+
+void update_screen()
+{
+  
+    matrix.fillScreen(matrix.Color333(0, 0, 0));
+
+    matrix.setCursor(0, 0);
+
+    matrix.setTextSize(1);     // size 1 == 8 pixels high
+    matrix.setTextWrap(false); // Don't wrap at end of line - will do ourselves
+
+    matrix.print("m:");
+    matrix.print(slaveCnt);
+
+    matrix.print(" ");
+
+    matrix.print("s:");
+    matrix.println(running_speed);
+
+    if (recv_diff > 0)
+    {
+      matrix.setCursor(2, 10);    // start at top left, with 8 pixel of spacing
+      
+      matrix.setTextSize(2);     // size 1 == 8 pixels high
+      matrix.setTextWrap(false); // Don't wrap at end of line - will do ourselves
+    
+      matrix.setTextColor(matrix.Color333(4,0,7));
+      matrix.println(recv_diff);
+    }
+    
 }
 
 void send_trigger_request_to_slave()
@@ -206,12 +409,54 @@ void send_trigger_request_to_slave()
 
     memset(sensor_data.payload,0,sizeof(sensor_data.payload));
 
-    esp_err_t result = esp_now_send(slaves[0].peer_addr, (const uint8_t *)&sensor_data, sizeof(sensor_data));
+    int rand_slave = 0;
+
+    if (slaveCnt > 1)
+    {
+      rand_slave = random(0, slaveCnt);  
+    }
+
+    Serial.print("random_index=");
+    Serial.println(rand_slave);
+
+    esp_err_t result = esp_now_send(slaves[rand_slave].peer_addr, (const uint8_t *)&sensor_data, sizeof(sensor_data));
 }
+
 
 void loop() {
   // Chill
-  delay(5000);
+     if (deviceConnected) {
+//        pTxCharacteristic->setValue(&txValue, 1);
+//        pTxCharacteristic->notify();
+//        txValue++;
+//        
+     // delay(10); // bluetooth stack will go into congestion, if too many packets are sent
+  }
 
-  send_trigger_request_to_slave();
+    // disconnecting
+    if (!deviceConnected && oldDeviceConnected) {
+        delay(500); // give the bluetooth stack the chance to get things ready
+        pServer->startAdvertising(); // restart advertising
+        Serial.println("start advertising");
+        oldDeviceConnected = deviceConnected;
+    }
+    // connecting
+    if (deviceConnected && !oldDeviceConnected) {
+    // do stuff here on connecting
+        oldDeviceConnected = deviceConnected;
+    }
+    
+   if (millis() > time_now + period)
+  {
+    // start laser
+    time_now = millis();
+
+    if (slaveCnt > 0)
+    {
+      send_trigger_request_to_slave();
+    }
+    
+  }
+
+  
 }

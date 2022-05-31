@@ -31,12 +31,15 @@
 #include "esp_now.h"
 #include "esp_crc.h"
 #include "espnow.h"
+#include "esp_sleep.h"
 #include "driver/gpio.h"
+#include "driver/rtc_io.h"
+#include "soc/rtc.h"
 
 #define ESPNOW_MAXDELAY 512
 
 
-#define GPIO_INPUT_IO_1     5
+#define GPIO_INPUT_IO_1     4
 #define GPIO_INPUT_PIN_SEL  (1ULL<<GPIO_INPUT_IO_1)
 
 #define LED_GPIO          10
@@ -54,6 +57,10 @@ static uint16_t s_espnow_seq[ESPNOW_DATA_MAX] = { 0, 0 };
 static void espnow_deinit(espnow_send_param_t *send_param);
 
 static int64_t start_time, end_time, diff_time = 0;
+
+static int64_t last_interaction_time = 0;
+
+static int time_out_count = 0;
 
 static esp_now_peer_info_t master_info;
 
@@ -112,6 +119,8 @@ static void espnow_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len
     espnow_event_t evt;
     espnow_event_recv_cb_t *recv_cb = &evt.info.recv_cb;
 
+    ESP_LOGI(TAG,"RECEIVED DATA!!!1111");
+
     if (mac_addr == NULL || data == NULL || len <= 0) {
         ESP_LOGE(TAG, "Receive cb arg error");
         return;
@@ -150,11 +159,11 @@ int espnow_data_parse(uint8_t *data, uint16_t data_len, uint8_t *state, uint16_t
     buf->crc = 0;
     crc_cal = esp_crc16_le(UINT16_MAX, (uint8_t const *)buf, data_len);
 
-    if (crc_cal == crc) {
-        return buf->type;
-    }
+    //if (crc_cal == crc) {
+    return buf->type;
+    //}
 
-    return -1;
+    //return -1;
 }
 
 /* Prepare ESPNOW data to be sent. */
@@ -173,7 +182,7 @@ void espnow_sensor_data_prepare(espnow_send_param_t *send_param, uint32_t millis
 
     // buf->magic = send_param->magic;
     /* Fill all remaining bytes after the data with random values */
-    ESP_LOGI(TAG, "length=%d\n", send_param->len - sizeof(espnow_data_t));
+    ESP_LOGI(TAG, "send_length=%d\n", send_param->len - sizeof(espnow_data_t));
 
     memcpy(buf->payload, &milliseconds, sizeof(uint32_t));
 
@@ -267,7 +276,7 @@ static void espnow_task(void *pvParameter)
             case ESPNOW_RECV_CB:
             {
                 espnow_event_recv_cb_t *recv_cb = &evt.info.recv_cb;
-
+                ESP_LOGI(TAG, "Received data!!!!!!!!!!!!");
                 ret = espnow_data_parse(recv_cb->data, recv_cb->data_len, &recv_state, &recv_seq, &sensor_data_type);
                 
                 // if (ret == ESPNOW_DATA_BROADCAST) {
@@ -330,45 +339,80 @@ static void espnow_task(void *pvParameter)
                     /* If receive unicast ESPNOW data, also stop sending broadcast ESPNOW data. */
 
 
+
+
+
                     send_param->broadcast = false;
-                    
-                    // 
+
+                                            
+                    if (esp_now_is_peer_exist(recv_cb->mac_addr) == false)
+                    {
+                        // set out mater as pee
+                        master_info.channel = CONFIG_ESPNOW_CHANNEL;
+                        master_info.ifidx = ESPNOW_WIFI_IF;
+                        master_info.encrypt = false;
+                        // memcpy(master_info.lmk, CONFIG_ESPNOW_LMK, ESP_NOW_KEY_LEN);
+                        memcpy(master_info.peer_addr, recv_cb->mac_addr, ESP_NOW_ETH_ALEN);
+
+                        ESP_LOGI(TAG,"add master peer");
+                        esp_now_add_peer(&master_info);
+                    }                    
+                    // r
                     if (sensor_data_type == SENSOR_DATA_REGISTER)
                     {
                         // waiting for response
                         ESP_LOGI(TAG, "SETUP Master Peer "MACSTR"", MAC2STR(recv_cb->mac_addr));
-
-
-
-                        // set out mater as peer
-                        master_info.channel = CONFIG_ESPNOW_CHANNEL;
-                        master_info.ifidx = ESPNOW_WIFI_IF;
-                        master_info.encrypt = true;
-                        memcpy(master_info.lmk, CONFIG_ESPNOW_LMK, ESP_NOW_KEY_LEN);
-                        memcpy(master_info.peer_addr, recv_cb->mac_addr, ESP_NOW_ETH_ALEN);
                         
-                        if (esp_now_is_peer_exist(recv_cb->mac_addr) == false)
-                        {
-                            esp_now_add_peer(&master_info);
-                        }
+                        // if (esp_now_is_peer_exist(recv_cb->mac_addr) == false)
+                        // {
+                        //     ESP_LOGI(TAG,"add master peer");
+                        //     esp_now_add_peer(&master_info);
+                        // }
                     }
                     else if (sensor_data_type == SENSOR_DATA_TRIGGER)
                     {
                         // trigger LED on
                         // waiting LED 
-                        ESP_LOGI(TAG, "Received Trigger Request, start light up the LED");
+                        
 
-                        start_time = esp_timer_get_time();
+                        if (button_triggered_status == 0)
+                        {
+                            ESP_LOGI(TAG, "Received Trigger Request, start light up the LED");
+                            start_time = esp_timer_get_time();
 
-                        gpio_set_level(LED_GPIO, 1);
+                            gpio_set_level(LED_GPIO, 1);
 
-                        button_triggered_status = 1;
+                            button_triggered_status = 1;
+                        }
+                        else{
+                            ESP_LOGI(TAG, "led still on");
+                            time_out_count++;
+
+                            if (time_out_count > 10)
+                            {
+                                // timeout, go to sleep
+                                const int ext_wakeup_pin_2 = 4;
+                                const uint64_t ext_wakeup_pin_2_mask = 1ULL << ext_wakeup_pin_2;
+
+                                ESP_LOGI(TAG,"Enabling EXT1 wakeup on pins GPIO%d\n", ext_wakeup_pin_2);
+                                esp_sleep_enable_ext1_wakeup(ext_wakeup_pin_2_mask, ESP_EXT1_WAKEUP_ANY_HIGH);
+
+                                esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+                                rtc_gpio_pullup_dis(ext_wakeup_pin_2);
+                                rtc_gpio_pulldown_en(ext_wakeup_pin_2);
+
+                                esp_deep_sleep_start();
+                            }
+                        }
+
+
 
                     }
                     else if (sensor_data_type == SENSOR_DATA_RECV_CONFIRM)
                     {
                         
-
+                        // espnow_send_param_t *send_param = (espnow_send_param_t *)pvParameter;
+                        
                     }
 
                 }
@@ -380,7 +424,9 @@ static void espnow_task(void *pvParameter)
             }
             case ESPNOW_BUTTON_PRESSED:
             {
+                time_out_count = 0;
                 ESP_LOGI(TAG, "Button triggered");
+                last_interaction_time = esp_timer_get_time();
                 if (button_triggered_status == 1)
                 {
                      end_time = esp_timer_get_time();
@@ -396,13 +442,29 @@ static void espnow_task(void *pvParameter)
 
 
                     ESP_LOGI(TAG, "Send diff data to master=%d", diff);
+
+                    ESP_LOGI(TAG, "MASTER_ADDR="MACSTR"", MAC2STR(master_info.peer_addr));
+
                     /* Send the next data after the previous data is sent. */
+                    if (esp_now_send(master_info.peer_addr, send_param->buffer, send_param->len) != ESP_OK) {
+                        ESP_LOGE(TAG, "Send error");
+                        espnow_deinit(send_param);
+                        vTaskDelete(NULL);
+                    }
+                    button_triggered_status = 0;
+                    gpio_set_level(LED_GPIO, 0);
+                }
+                else
+                {
+                    // send message to master if to make sure it's registered
+                    send_param->broadcast = true;
+
                     if (esp_now_send(send_param->dest_mac, send_param->buffer, send_param->len) != ESP_OK) {
                         ESP_LOGE(TAG, "Send error");
                         espnow_deinit(send_param);
                         vTaskDelete(NULL);
                     }
-
+                    
                 }
             
 
@@ -433,7 +495,7 @@ static esp_err_t espnow_init(void)
     ESP_ERROR_CHECK( esp_now_register_recv_cb(espnow_recv_cb) );
 
     /* Set primary master key. */
-    ESP_ERROR_CHECK( esp_now_set_pmk((uint8_t *)CONFIG_ESPNOW_PMK) );
+    // ESP_ERROR_CHECK( esp_now_set_pmk((uint8_t *)CONFIG_ESPNOW_PMK) );
 
     /* Add broadcast peer information to peer list. */
     esp_now_peer_info_t *peer = malloc(sizeof(esp_now_peer_info_t));
@@ -494,6 +556,28 @@ static void espnow_deinit(espnow_send_param_t *send_param)
 
 void app_main(void)
 {
+    time_out_count = 0;
+esp_sleep_wakeup_cause_t wakeup_reason;
+
+  wakeup_reason = esp_sleep_get_wakeup_cause();
+    switch (wakeup_reason) {
+        case ESP_SLEEP_WAKEUP_EXT1: {
+            ESP_LOGI(TAG, "Wakeup caused by external signal using RTC_CNTL"); break;
+            uint64_t wakeup_pin_mask = esp_sleep_get_ext1_wakeup_status();
+            if (wakeup_pin_mask != 0) {
+                int pin = __builtin_ffsll(wakeup_pin_mask) - 1;
+                ESP_LOGI(TAG, "Wake up from GPIO %d\n", pin);
+            } else {
+                ESP_LOGI(TAG, "Wake up from GPIO\n");
+            }
+        }
+        break;
+        case ESP_SLEEP_WAKEUP_EXT0 :  ESP_LOGI(TAG, "Wakeup caused by external signal using RTC_IO"); break;
+        case ESP_SLEEP_WAKEUP_TIMER :  ESP_LOGI(TAG, "Wakeup caused by timer"); break;
+        case ESP_SLEEP_WAKEUP_TOUCHPAD :  ESP_LOGI(TAG, "Wakeup caused by touchpad"); break;
+        case ESP_SLEEP_WAKEUP_ULP : ESP_LOGI(TAG, "Wakeup caused by ULP program"); break;
+        default :  ESP_LOGI(TAG, "Wakeup was not caused by deep sleep: %d\n",wakeup_reason); break;
+    }
 
 
     //zero-initialize the config structure.
@@ -521,7 +605,7 @@ void app_main(void)
     //set as input mode
     io_conf.mode = GPIO_MODE_INPUT;
     //enable pull-up mode
-    io_conf.pull_up_en = 1;
+    io_conf.pull_down_en = 1;
     gpio_config(&io_conf);
 
 
