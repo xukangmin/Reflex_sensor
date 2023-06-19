@@ -167,6 +167,32 @@ int espnow_data_parse(uint8_t *data, uint16_t data_len, uint8_t *state, uint16_t
 }
 
 /* Prepare ESPNOW data to be sent. */
+void espnow_sleep_data_prepare(espnow_send_param_t *send_param)
+{
+    espnow_data_t *buf = (espnow_data_t *)send_param->buffer;
+
+    assert(send_param->len >= sizeof(espnow_data_t));
+
+    buf->type = IS_BROADCAST_ADDR(send_param->dest_mac) ? ESPNOW_DATA_BROADCAST : ESPNOW_DATA_UNICAST;
+    buf->state = send_param->state;
+    buf->seq_num = s_espnow_seq[buf->type]++;
+    buf->crc = 0;
+    buf->sensor_data_type = SENSOR_GO_TO_SLEEP;
+
+    uint8_t battery_level = 99;
+    // buf->magic = send_param->magic;
+    /* Fill all remaining bytes after the data with random values */
+    ESP_LOGI(TAG, "send_length=%d\n", send_param->len - sizeof(espnow_data_t));
+
+    memcpy(buf->payload, &battery_level, sizeof(uint8_t));
+
+
+    //esp_fill_random(buf->payload, send_param->len - sizeof(espnow_data_t));
+    buf->crc = esp_crc16_le(UINT16_MAX, (uint8_t const *)buf, send_param->len);
+}
+
+
+/* Prepare ESPNOW data to be sent. */
 void espnow_sensor_data_prepare(espnow_send_param_t *send_param, uint32_t milliseconds)
 {
     espnow_data_t *buf = (espnow_data_t *)send_param->buffer;
@@ -388,13 +414,25 @@ static void espnow_task(void *pvParameter)
                             ESP_LOGI(TAG, "led still on");
                             time_out_count++;
 
-                            if (time_out_count > 10)
+                            if (time_out_count > 2)
                             {
+                                
+                                memcpy(send_param->dest_mac, master_info.peer_addr, ESP_NOW_ETH_ALEN);
+                                espnow_sleep_data_prepare(send_param);
+
+
+                                /* Send the next data after the previous data is sent. */
+                                if (esp_now_send(master_info.peer_addr, send_param->buffer, send_param->len) != ESP_OK) {
+                                    ESP_LOGE(TAG, "Send error");
+                                    espnow_deinit(send_param);
+                                    vTaskDelete(NULL);
+                                }
+
                                 // timeout, go to sleep
                                 const int ext_wakeup_pin_2 = 4;
                                 const uint64_t ext_wakeup_pin_2_mask = 1ULL << ext_wakeup_pin_2;
 
-                                ESP_LOGI(TAG,"Enabling EXT1 wakeup on pins GPIO%d\n", ext_wakeup_pin_2);
+                                ESP_LOGI(TAG,"GO TO SLEEP, Enabling EXT1 wakeup on pins GPIO%d\n", ext_wakeup_pin_2);
                                 esp_sleep_enable_ext1_wakeup(ext_wakeup_pin_2_mask, ESP_EXT1_WAKEUP_ANY_HIGH);
 
                                 esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);

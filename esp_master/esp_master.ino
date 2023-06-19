@@ -33,6 +33,8 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 
+
+
 BLEServer *pServer = NULL;
 BLECharacteristic * pTxCharacteristic;
 bool deviceConnected = false;
@@ -79,6 +81,9 @@ RGBmatrixPanel matrix(A, B, C, D, CLK, LAT, OE, false, 64);
 
 #define NUMSLAVES 20
 esp_now_peer_info_t slaves[NUMSLAVES] = {};
+
+int slaves_active[NUMSLAVES] = {0};
+
 int slaveCnt = 0;
 
 int period = 10000;
@@ -107,6 +112,7 @@ enum {
     SENSOR_DATA_TRIGGER,
     SENSOR_DATA_RECV_CONFIRM,
     SENSOR_DATA_RESULT,
+    SENSOR_GO_TO_SLEEP
 };
 
 /* User defined field of ESPNOW data in this example. */
@@ -253,28 +259,39 @@ void setup() {
   update_screen();
 }
 
+int find_index(const uint8_t *mac_addr)
+{
 
-// callback when data is recv from Master
-void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
-  char macStr[18];
-  snprintf(macStr, sizeof(macStr), "%02x:%02x:%02x:%02x:%02x:%02x",
-           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+   for (int i = 0; i < slaveCnt; i++)
+   {
+      if (memcmp(mac_addr,slaves[i].peer_addr,ESP_NOW_ETH_ALEN) == 0)
+      {
+        return i;
+      }
+   }
 
- 
-  Serial.print("Last Packet Recv from: "); Serial.println(macStr);
-  Serial.println("Last Packet Recv Data: "); 
-  for (int i = 0; i < data_len; i++)
-  {
-    Serial.print(data[i],HEX);
-    Serial.print(" ");
-  }
-  Serial.println("");
-  // add peer
 
-  espnow_data_t* recv_data = (espnow_data_t*)data;
+   return -1;
+}
 
-  if (recv_data->type == ESPNOW_DATA_BROADCAST)
-  {
+int get_active_sensors()
+{
+
+   int active_sensors = 0;
+   for (int i = 0; i < slaveCnt; i++)
+   {
+      if (slaves_active[i] == 1)
+      {
+        active_sensors++;
+      }
+   }
+
+   return active_sensors;
+}
+
+
+void add_sensor(const uint8_t *mac_addr)
+{
       if (esp_now_is_peer_exist(mac_addr) == false)
       {
         slaves[slaveCnt].channel = CONFIG_ESPNOW_CHANNEL;
@@ -282,7 +299,8 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
         slaves[slaveCnt].ifidx = (wifi_interface_t)ESP_IF_WIFI_STA;
         // memcpy(slaves[slaveCnt].lmk, CONFIG_ESPNOW_LMK, ESP_NOW_KEY_LEN);
         memcpy(slaves[slaveCnt].peer_addr, mac_addr, ESP_NOW_ETH_ALEN);
-    
+        slaves_active[slaveCnt] = 1;
+        
         esp_err_t addStatus = esp_now_add_peer(&slaves[slaveCnt]);
         if (addStatus == ESP_OK) {
           // Pair success
@@ -302,7 +320,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
           Serial.println("Not sure what happened");
         }
     
-       
+        
     
         // memset(sensor_data.payload,0,sizeof(sensor_data.payload));
     
@@ -323,7 +341,40 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
         Serial.println("peer added");
         update_screen();
       }
+}
 
+// callback when data is recv from Master
+void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
+  char macStr[18];
+  snprintf(macStr, sizeof(macStr), "%02x:%02x:%02x:%02x:%02x:%02x",
+           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+
+ 
+  Serial.print("Last Packet Recv from: "); Serial.println(macStr);
+  Serial.println("Last Packet Recv Data: "); 
+  for (int i = 0; i < data_len; i++)
+  {
+    Serial.print(data[i],HEX);
+    Serial.print(" ");
+  }
+  Serial.println("");
+  // add peer
+
+  espnow_data_t* recv_data = (espnow_data_t*)data;
+  int index_sensor = find_index(mac_addr); 
+
+  Serial.print("found index_sensor=");
+  Serial.println(index_sensor);
+  if (index_sensor >= 0)
+  {
+    Serial.println("setup sensor to active");
+    slaves_active[index_sensor] = 1;
+  }
+  
+  if (recv_data->type == ESPNOW_DATA_BROADCAST)
+  {
+      add_sensor(mac_addr);
+      
       sensor_data.type = ESPNOW_DATA_UNICAST;
       sensor_data.state = 0;
       sensor_data.seq_num = seq_num++;
@@ -340,17 +391,23 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
         Serial.print("send error=");
         Serial.println(result);
       }
-      
+
+
+  
   }
     
   
-
+  
 
   
+
   
 
   if (recv_data->sensor_data_type == SENSOR_DATA_RESULT)
   {
+
+    add_sensor(mac_addr);
+    
     Serial.println("receive result data from slave");
 
     memcpy(&recv_diff,recv_data->payload,sizeof(uint32_t));
@@ -366,6 +423,29 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
   }
   
 
+ if (recv_data->sensor_data_type == SENSOR_GO_TO_SLEEP)
+  {
+    Serial.println("receive SLEEP request from from slave");
+
+
+    if (index_sensor >= 0)
+    {
+        
+        slaves_active[index_sensor] = 0;
+        
+        Serial.print("Sleep ind=");
+
+        Serial.println(index_sensor);
+    }
+    
+
+
+
+    update_screen();
+    result_received = 1;
+
+  }
+
 }
 
 void update_screen()
@@ -379,6 +459,8 @@ void update_screen()
     matrix.setTextWrap(false); // Don't wrap at end of line - will do ourselves
 
     matrix.print("m:");
+    matrix.print(get_active_sensors());
+    matrix.print("/");
     matrix.print(slaveCnt);
 
     matrix.print(" ");
@@ -419,7 +501,12 @@ void send_trigger_request_to_slave()
     Serial.print("random_index=");
     Serial.println(rand_slave);
 
-    esp_err_t result = esp_now_send(slaves[rand_slave].peer_addr, (const uint8_t *)&sensor_data, sizeof(sensor_data));
+    if(slaves_active[rand_slave] == 1)
+    {
+      Serial.println("send trigger");
+      esp_err_t result = esp_now_send(slaves[rand_slave].peer_addr, (const uint8_t *)&sensor_data, sizeof(sensor_data));  
+    }
+    
 }
 
 

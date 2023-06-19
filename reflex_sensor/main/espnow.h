@@ -63,6 +63,7 @@ enum {
     SENSOR_DATA_TRIGGER,
     SENSOR_DATA_RECV_CONFIRM,
     SENSOR_DATA_RESULT,
+    SENSOR_GO_TO_SLEEP
 };
 
 /* User defined field of ESPNOW data in this example. */
